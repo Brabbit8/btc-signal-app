@@ -327,13 +327,35 @@ class OKXClient:
 
     # ── HTTP helpers ───────────────────────────────────────
 
+    def _request(self, method: str, url: str, params: dict = None,
+                 headers: dict = None) -> dict:
+        """发送请求，代理开/关自适应。
+        先直连，失败后自动尝试系统代理。"""
+        proxies_direct = {"http": None, "https": None}   # 不走代理
+        proxies_system = None  # requests 默认走系统代理
+
+        for label, proxies in [("直连", proxies_direct), ("代理", proxies_system)]:
+            try:
+                if method == "GET":
+                    resp = requests.get(url, params=params, headers=headers,
+                                        timeout=10, proxies=proxies)
+                else:
+                    resp = requests.request(method, url, params=params,
+                                            headers=headers, timeout=10, proxies=proxies)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") != "0":
+                    raise RuntimeError(f"OKX API: {data.get('msg', 'unknown')}")
+                return data
+            except requests.exceptions.ConnectionError:
+                continue  # 直连失败，尝试代理
+            except requests.exceptions.ProxyError:
+                continue  # 代理不可用，等下直连会成功
+
+        raise RuntimeError(f"OKX API 连接失败（直连和代理均不可用）: {url}")
+
     def _get(self, url: str, params: dict = None) -> dict:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX API: {data.get('msg', 'unknown')}")
-        return data
+        return self._request("GET", url, params=params)
 
     def _signed_get(self, url: str, params: dict = None) -> dict:
         """带签名的 GET 请求。"""
@@ -342,7 +364,6 @@ class OKXClient:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
              str(datetime.now(timezone.utc).microsecond // 1000).zfill(3) + "Z"
 
-        # Build query string for signing
         if "?" in url:
             path = url.split(REST_URL)[1]
         else:
@@ -364,9 +385,7 @@ class OKXClient:
             "OK-ACCESS-PASSPHRASE": self.creds["passphrase"],
             "Content-Type": "application/json",
         }
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", url, params=params, headers=headers)
 
     def has_credentials(self) -> bool:
         """是否配置了 API Key 认证。"""
