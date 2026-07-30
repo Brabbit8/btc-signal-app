@@ -1,5 +1,6 @@
 *.log
 apikey.txt
+btc_signal_config.json
 btc_signal_state.json
 btc_signal_alert.txt
 btc_signal_status.json
