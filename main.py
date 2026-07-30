@@ -378,6 +378,14 @@ def run_ai_analysis_once():
 def main():
     print("BTC Signal App v1.0 starting...")
 
+    # Auto-initialize config from example if missing
+    if not CONFIG_PATH.exists():
+        example = SCRIPT_DIR / "btc_signal_config.example.json"
+        if example.exists():
+            import shutil
+            shutil.copy(example, CONFIG_PATH)
+            print("Created btc_signal_config.json from example. Edit it to add your signal token.")
+
     # Check API key
     if not get_api_key():
         print("\nNo DeepSeek API key found.")
