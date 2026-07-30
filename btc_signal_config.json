@@ -1,0 +1,16 @@
+{
+  "webhook_url": "https://www.okx.com/pap/algo/signal/trigger",
+  "signal_token": "uHqBX/8PFPW9J3pgQy3PyKyZVgfH4nr3gqrn4MerCjCekaCOG4/CRzLGah7uVvamTBYUAKKq5iPaC5iQ0oOvQg==",
+  "instrument": "BTC-USDT-SWAP",
+  "bar": "15m",
+  "bb_period": 20,
+  "bb_mult": 1.9,
+  "rsi_period": 14,
+  "rsi_oversold": 31,
+  "rsi_overbought": 69,
+  "cooldown_minutes": 169,
+  "entry_investment_type": "percentage_balance",
+  "entry_amount": "100",
+  "exit_investment_type": "percentage_position",
+  "exit_amount": "100"
+}
