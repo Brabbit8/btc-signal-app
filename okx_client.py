@@ -109,6 +109,153 @@ class OKXClient:
         data = self._get(url, {"instType": "SWAP", "instId": inst_id})
         return float(data["data"][0]["markPx"])
 
+    # ── Public: Indicators & Instruments ───────────────────
+
+    def get_indicator(self, inst_id: str, indicator: str, bar: str = "1H",
+                      params: list = None) -> dict | list:
+        """获取技术指标值。支持 70+ 指标（MA/EMA/RSI/MACD/BB/KDJ/AHR999/BTCRAINBOW 等）。
+        公开接口，无需认证。"""
+        cache_key = f"ind_{inst_id}_{indicator}_{bar}"
+        if self._cache_hit(cache_key, 30):
+            return self._cache[cache_key]
+
+        url = f"{REST_URL}/api/v5/market/indicator"
+        req_params = {"instId": inst_id, "indicator": indicator, "bar": bar}
+        if params:
+            req_params["params"] = ",".join(str(p) for p in params)
+        data = self._get(url, req_params)
+        self._cache_set(cache_key, data["data"], 30)
+        return data["data"]
+
+    def get_instruments(self, inst_type: str = "SWAP",
+                        inst_id: str = None) -> list[dict]:
+        """获取交易产品列表及合约规格（最小下单量/面值/手续费等）。"""
+        url = f"{REST_URL}/api/v5/public/instruments"
+        params = {"instType": inst_type}
+        if inst_id:
+            params["instId"] = inst_id
+        data = self._get(url, params)
+        return data["data"]
+
+    def get_index_candles(self, index: str = "BTC-USD", bar: str = "1H",
+                          limit: int = 100) -> list[dict]:
+        """获取指数 K 线（如 BTC-USD 指数）。"""
+        cache_key = f"idx_{index}_{bar}_{limit}"
+        if self._cache_hit(cache_key, 30):
+            return self._cache[cache_key]
+
+        url = f"{REST_URL}/api/v5/market/index-candles"
+        data = self._get(url, {"instId": index, "bar": bar, "limit": limit})
+        candles = []
+        for row in reversed(data.get("data", [])):
+            candles.append({"ts": int(row[0]), "open": float(row[1]),
+                           "high": float(row[2]), "low": float(row[3]),
+                           "close": float(row[4])})
+        self._cache_set(cache_key, candles, 30)
+        return candles
+
+    # ── News (requires API Key) ─────────────────────────────
+
+    def get_news_latest(self, limit: int = 10, language: str = "zh-CN") -> list[dict]:
+        """获取最新加密货币新闻（需认证）。"""
+        if self.auth_type != "api_key":
+            return []
+
+        url = f"{REST_URL}/api/v5/news/latest"
+        try:
+            data = self._signed_get(url, {"limit": limit, "language": language})
+            articles = []
+            for item in data.get("data", [])[:limit]:
+                articles.append({
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "time": item.get("publishTime", ""),
+                    "source": item.get("source", ""),
+                    "url": item.get("url", ""),
+                })
+            return articles
+        except Exception as e:
+            log.error(f"获取新闻失败: {e}")
+            return []
+
+    def get_news_by_coin(self, coin: str = "BTC",
+                         limit: int = 10) -> list[dict]:
+        """获取指定币种的新闻（需认证）。"""
+        if self.auth_type != "api_key":
+            return []
+
+        url = f"{REST_URL}/api/v5/news/by-coin"
+        try:
+            data = self._signed_get(url, {"coins": coin, "limit": limit})
+            articles = []
+            for item in data.get("data", [])[:limit]:
+                articles.append({
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "time": item.get("publishTime", ""),
+                    "source": item.get("source", ""),
+                })
+            return articles
+        except Exception as e:
+            log.error(f"获取{coin}新闻失败: {e}")
+            return []
+
+    # ── Smart Money (requires API Key) ──────────────────────
+
+    def get_smart_money_traders(self, period: str = "7",
+                                sort_by: str = "pnl",
+                                limit: int = 10) -> list[dict]:
+        """获取智能资金交易员排行榜（需认证）。"""
+        if self.auth_type != "api_key":
+            return []
+
+        url = f"{REST_URL}/api/v5/trading-data/smart-money/traders"
+        try:
+            data = self._signed_get(
+                url, {"period": period, "sortBy": sort_by, "limit": limit})
+            traders = []
+            for item in data.get("data", []):
+                traders.append({
+                    "nickname": item.get("nickName", ""),
+                    "pnl": float(item.get("pnl", 0)),
+                    "pnl_ratio": float(item.get("pnlRatio", 0)),
+                    "win_rate": float(item.get("winRate", 0)),
+                    "aum": float(item.get("aum", 0)),
+                    "follower_count": int(item.get("followerCount", 0)),
+                    "author_id": item.get("authorId", ""),
+                })
+            return traders
+        except Exception as e:
+            log.error(f"获取智能资金交易员失败: {e}")
+            return []
+
+    def get_smart_money_signals(self, period: str = "7",
+                                sort_by: str = "pnl",
+                                top_coins: int = 5) -> list[dict]:
+        """获取智能资金共识信号（需认证）。"""
+        if self.auth_type != "api_key":
+            return []
+
+        url = f"{REST_URL}/api/v5/trading-data/smart-money/overview"
+        try:
+            data = self._signed_get(
+                url, {"period": period, "sortBy": sort_by,
+                      "topInstruments": top_coins})
+            signals = []
+            for item in data.get("data", []):
+                signals.append({
+                    "inst_ccy": item.get("instCcy", ""),
+                    "l_ratio": float(item.get("lRatio", 0)),
+                    "s_ratio": float(item.get("sRatio", 0)),
+                    "weighted_l_ratio": float(item.get("weightedLRatio", 0)),
+                    "entry_px_dist": item.get("entryPxDist", ""),
+                    "traders_qualified": int(item.get("tradersQualified", 0)),
+                })
+            return signals
+        except Exception as e:
+            log.error(f"获取智能资金信号失败: {e}")
+            return []
+
     # ── Authenticated REST (requires API Key) ──────────────
 
     def get_balance(self) -> dict:
