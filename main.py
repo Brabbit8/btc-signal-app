@@ -28,6 +28,7 @@ from okx_client import OKXClient
 from strategy_engine import check_signal, get_mode_info
 from skill_registry import SKILLS, run_skill
 from btc_signal_bot import fetch_candles, calc_bb, calc_rsi, calc_atr, load_state, save_state
+import okx_cli
 
 logging.basicConfig(
     level=logging.INFO,
@@ -196,11 +197,14 @@ class App:
         bar.pack(fill=tk.X, padx=20, pady=(4, 2))
 
         ai_status = f"AI: ✅ {ai_cfg['provider_name']}" if ai_cfg['enabled'] else "AI: ⚠️ 未配置"
-        okx_status = "交易所: ✅ OKX" if (okx_cfg.get("api_key") or okx_cfg.get("signal_token")) else "交易所: ⚠️ 未配置"
+        cli_ok = okx_cli.is_installed()
+        cli_status = "CLI: ✅ 已安装" if cli_ok else "CLI: ⚠️ 未安装(功能受限)"
+        key_ok = bool(okx_cfg.get("api_key") or okx_cfg.get("signal_token"))
+        okx_status = "交易所: ✅ OKX" if (key_ok or cli_ok) else "交易所: ⚠️ 未配置"
         price = app_state.get("price", 0)
         signal = app_state.get("signal")
 
-        status_text = f"  {ai_status}  |  {okx_status}  |  价格: ${price:,.1f}"
+        status_text = f"  {ai_status}  |  {cli_status}  |  {okx_status}  |  价格: ${price:,.1f}"
         if signal:
             status_text += f"  |  信号: {signal}"
 
@@ -415,6 +419,28 @@ class App:
         ttk.Button(test_okx, text="验证交易所连接", command=self._test_okx).pack(side=tk.LEFT)
         self.okx_status_lbl = tk.Label(test_okx, text="", font=("Microsoft YaHei", 8), fg=self.dim, bg=self.bg)
         self.okx_status_lbl.pack(side=tk.LEFT, padx=8)
+
+        # ── CLI Status ──
+        self._section(sf, "③ OKX CLI 工具包 (可选)", 8)
+        if okx_cli.is_installed():
+            tk.Label(sf, text="✅ OKX CLI 已安装 — 167 个工具全部可用",
+                     font=("Microsoft YaHei", 9), fg=self.green, bg=self.bg).pack(
+                fill=tk.X, padx=px, pady=2)
+            tk.Label(sf, text="智能资金/新闻/筛选器等高级功能已启用",
+                     font=("Microsoft YaHei", 8), fg=self.dim, bg=self.bg).pack(
+                fill=tk.X, padx=px)
+        else:
+            tk.Label(sf, text="⚠️ OKX CLI 未安装 — 部分高级功能不可用",
+                     font=("Microsoft YaHei", 9), fg=self.yellow, bg=self.bg).pack(
+                fill=tk.X, padx=px, pady=2)
+            guide_text = okx_cli.get_install_guide()
+            self.cli_guide = scrolledtext.ScrolledText(
+                sf, font=("Consolas", 9), bg=self.card_bg, fg=self.fg,
+                height=5, relief=tk.FLAT, borderwidth=0, padx=8, pady=4,
+            )
+            self.cli_guide.pack(fill=tk.X, padx=px, pady=4)
+            self.cli_guide.insert("1.0", guide_text)
+            self.cli_guide.config(state=tk.DISABLED)
 
         # ── Save ──
         self._section(sf, "", 8)

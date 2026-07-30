@@ -2,12 +2,28 @@
 """
 技能注册中心 — 7 个内置分析技能
 每个技能 = 数据获取 + Prompt 模板 + AI 分析 = 一键生成报告
+
+数据获取优先级：
+  1. okx CLI (okx-cli) — 167 个工具全可用（需 npm install）
+  2. OKX REST API (okx_client) — 公开 + 认证 API
+  3. 回退提示 — 请配置 API Key 或安装 CLI
 """
 
 import logging
 from datetime import datetime
 
 log = logging.getLogger("btc_app")
+
+
+def _get_cli():
+    """获取 OKX CLI 桥接（如果已安装）。"""
+    try:
+        import okx_cli
+        if okx_cli.is_installed():
+            return okx_cli
+    except Exception:
+        pass
+    return None
 
 # ── 技能定义 ────────────────────────────────────────────────
 
@@ -202,20 +218,34 @@ def _fetch_signal_data(client) -> dict:
 
 
 def _fetch_smart_money_data(client) -> dict:
+    cli = _get_cli()
+    if cli:
+        traders = cli.smartmoney_traders("7", "pnl", 10)
+        signals = cli.smartmoney_signals("7", "pnl", 5)
+        return {"traders": traders.get("data", []), "signals": signals.get("data", []),
+                "has_auth": True, "note": "数据来源: OKX CLI"}
+
     traders = client.get_smart_money_traders("7", "pnl", 10)
     signals = client.get_smart_money_signals("7", "pnl", 5)
     return {"traders": traders, "signals": signals,
             "has_auth": client.has_credentials(),
-            "note": "" if client.has_credentials() else "请配置 OKX API Key 后查看智能资金数据"}
+            "note": "" if client.has_credentials() else "请配置 OKX API Key 或安装 CLI 后查看"}
 
 
 def _fetch_sentiment_data(client) -> dict:
     from skills.sentiment import fetch_fear_greed
     fg = fetch_fear_greed(7)
+
+    cli = _get_cli()
+    if cli:
+        news = cli.news_by_coin("BTC", 10)
+        return {"fear_greed": fg, "news": news.get("data", []),
+                "has_auth": True, "note": "数据来源: OKX CLI"}
+
     news = client.get_news_by_coin("BTC", 10) if client.has_credentials() else []
     return {"fear_greed": fg, "news": news,
             "has_auth": client.has_credentials(),
-            "note": "" if client.has_credentials() else "请配置 OKX API Key 获取实时新闻"}
+            "note": "" if client.has_credentials() else "请配置 OKX API Key 或安装 CLI 获取实时新闻"}
 
 
 def _fetch_risk_data(client) -> dict:
