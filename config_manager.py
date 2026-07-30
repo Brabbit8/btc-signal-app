@@ -71,6 +71,9 @@ DEFAULT_STRATEGY = {
     "entry_amount": "100",
     "exit_investment_type": "percentage_position",
     "exit_amount": "100",
+    "strategy_mode": "mean_reversion",
+    "breakout_lookback": 20,
+    "breakout_vol_mult": 1.2,
 }
 
 DEFAULT_AI_CONFIG = {

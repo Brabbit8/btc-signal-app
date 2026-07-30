@@ -25,6 +25,7 @@ from config_manager import (
     AI_PROVIDERS, is_configured, init_config,
 )
 from ai_client import AIClient
+from strategy_engine import check_signal, get_mode_info
 from btc_signal_bot import (
     fetch_candles, calc_bb, calc_rsi, calc_atr, load_state, save_state,
 )
@@ -99,10 +100,11 @@ def call_ai_analysis(config: dict):
 Price: ${price:.1f} | RSI: {rsi:.1f} | ATR: {atr:.1f}
 BB: U={upper:.1f} M={mid:.1f} L={lower:.1f} (mult={config['bb_mult']})
 ADX(1H): {adx:.1f} | EMA20(1H): {ema20:.1f} | EMA50(1H): {ema50:.1f}
-Config: rsi_os={config['rsi_oversold']}, rsi_ob={config['rsi_overbought']}, cooldown={config['cooldown_minutes']}min
+Config: rsi_os={config['rsi_oversold']}, rsi_ob={config['rsi_overbought']}, cooldown={config['cooldown_minutes']}min, strategy={config.get('strategy_mode', 'mean_reversion')}
 
-Analyze regime (ranging/trending_up/trending_down). Suggest param adjustments. Reply ONLY JSON:
-{{"regime":"<ranging|trending_up|trending_down>","confidence":<0-1>,"rsi_oversold":<25-45>,"rsi_overbought":<55-75>,"cooldown_minutes":<30-240>,"bb_mult":<1.5-2.5>,"reason":"<one short sentence>"}}"""
+Available modes: mean_reversion (BB+RSI,ranging), trend_following (EMA+ADX,trending), breakout (breakout+vol,trending)
+Analyze regime + suggest params + best strategy mode. Reply ONLY JSON:
+{{"regime":"<ranging|trending_up|trending_down>","confidence":<0-1>,"rsi_oversold":<25-45>,"rsi_overbought":<55-75>,"cooldown_minutes":<30-240>,"bb_mult":<1.5-2.5>","strategy_mode":"<mean_reversion|trend_following|breakout>","reason":"<one short sentence>"}}"""
 
     result = client.chat_json(system_prompt, user_msg)
     if result:
@@ -123,6 +125,8 @@ def run_ai_analysis_loop():
                 config["rsi_overbought"] = int(result.get("rsi_overbought", config["rsi_overbought"]))
                 config["cooldown_minutes"] = int(result.get("cooldown_minutes", config["cooldown_minutes"]))
                 config["bb_mult"] = float(result.get("bb_mult", config["bb_mult"]))
+                if "strategy_mode" in result:
+                    config["strategy_mode"] = result["strategy_mode"]
                 save_config(config)
                 with lock:
                     app_state["regime"] = result.get("regime", "?")
@@ -154,6 +158,8 @@ def run_ai_analysis_once():
         config["rsi_overbought"] = int(result.get("rsi_overbought", config["rsi_overbought"]))
         config["cooldown_minutes"] = int(result.get("cooldown_minutes", config["cooldown_minutes"]))
         config["bb_mult"] = float(result.get("bb_mult", config["bb_mult"]))
+        if "strategy_mode" in result:
+            config["strategy_mode"] = result["strategy_mode"]
         save_config(config)
         with lock:
             app_state["regime"] = result.get("regime", "?")
@@ -174,7 +180,7 @@ def run_signal_check():
             state = load_state()
             now = datetime.now(timezone.utc)
 
-            candles = fetch_candles(config["instrument"], config["bar"], limit=30)
+            candles = fetch_candles(config["instrument"], config["bar"], limit=60)
             price = candles[-1]["close"]
             upper, mid, lower = calc_bb(candles, config["bb_period"], config["bb_mult"])
             rsi = calc_rsi(candles, config["rsi_period"])
@@ -184,27 +190,17 @@ def run_signal_check():
             cooldown_ok = (now.timestamp() - last_ts) >= config["cooldown_minutes"] * 60
             position = state.get("position", "NONE")
 
-            long_entry = price <= lower * 1.003 and rsi < config["rsi_oversold"]
-            short_entry = price >= upper * 0.997 and rsi > config["rsi_overbought"]
-            long_exit = position == "LONG" and price >= mid
-            short_exit = position == "SHORT" and price <= mid
+            # 使用策略引擎检测信号（支持多种策略模式）
+            action, reason = check_signal(candles, config, position)
 
-            action = None
-            reason = ""
-
-            if position == "LONG" and long_exit:
-                action = "EXIT_LONG"
-                reason = f"价格 {price:.1f} >= 中轨 {mid:.1f}"
-            elif position == "SHORT" and short_exit:
-                action = "EXIT_SHORT"
-                reason = f"价格 {price:.1f} <= 中轨 {mid:.1f}"
-            elif cooldown_ok and position == "NONE":
-                if long_entry:
-                    action = "ENTER_LONG"
-                    reason = f"价格 {price:.1f} 触及下轨 {lower:.1f}, RSI={rsi:.1f}"
-                elif short_entry:
-                    action = "ENTER_SHORT"
-                    reason = f"价格 {price:.1f} 触及上轨 {upper:.1f}, RSI={rsi:.1f}"
+            # 入场需符合冷却时间 + 无持仓
+            if action and action.startswith("ENTER_") and (not cooldown_ok or position != "NONE"):
+                action = None
+                reason = ""
+            # 离场不检查冷却时间
+            if action and action.startswith("EXIT_") and position == "NONE":
+                action = None
+                reason = ""
 
             cooldown_s = max(0, int(config["cooldown_minutes"] * 60 - (now.timestamp() - last_ts)))
 
@@ -368,10 +364,15 @@ class BTCSignalApp:
             ("lbl_status", "运行状态"),
         ])
 
+        # Strategy mode indicator
+        self.lbl_strategy_mode = tk.Label(parent, text="", font=("Microsoft YaHei", 8, "bold"),
+                                           fg=self.accent, bg=self.bg, anchor=tk.W)
+        self.lbl_strategy_mode.pack(fill=tk.X, padx=12, pady=(2, 0))
+
         # Config bar
         self.lbl_config_bar = tk.Label(parent, text="", font=("Microsoft YaHei", 8),
                                         fg=self.dim, bg=self.bg, anchor=tk.W)
-        self.lbl_config_bar.pack(fill=tk.X, padx=12, pady=(2, 8))
+        self.lbl_config_bar.pack(fill=tk.X, padx=12, pady=(0, 8))
 
     def _make_card(self, parent, title, fields):
         frame = tk.Frame(parent, bg=self.card_bg)
@@ -668,6 +669,19 @@ class BTCSignalApp:
         # ── Strategy Section ──
         self._section_label(scroll_frame, "策略参数", 6)
 
+        # Strategy mode selector
+        mode_row = tk.Frame(scroll_frame, bg=self.bg)
+        mode_row.pack(fill=tk.X, padx=padx, pady=pady)
+        tk.Label(mode_row, text="策略模式:", font=("Microsoft YaHei", 9), fg=self.fg, bg=self.bg,
+                 width=10, anchor=tk.W).pack(side=tk.LEFT)
+        from strategy_engine import STRATEGY_MODES
+        mode_names = [f"{k} — {v['name']} ({v['description'][:20]}...)" for k, v in STRATEGY_MODES.items()]
+        self.cfg_strategy_mode = ttk.Combobox(mode_row, values=list(STRATEGY_MODES.keys()),
+                                               state="readonly", width=22)
+        self.cfg_strategy_mode.pack(side=tk.LEFT)
+        tk.Label(mode_row, text="AI 可自动切换", font=("Microsoft YaHei", 8),
+                 fg=self.dim, bg=self.bg).pack(side=tk.LEFT, padx=6)
+
         strat_fields = [
             ("cfg_bb_period", "BB 周期", "20"),
             ("cfg_bb_mult", "BB 乘数", "2.0"),
@@ -747,6 +761,7 @@ class BTCSignalApp:
         self.cfg_rsi_ob.insert(0, str(config.get("rsi_overbought", 65)))
         self.cfg_cooldown.delete(0, tk.END)
         self.cfg_cooldown.insert(0, str(config.get("cooldown_minutes", 120)))
+        self.cfg_strategy_mode.set(config.get("strategy_mode", "mean_reversion"))
 
     def _on_provider_change(self, event=None):
         """供应商切换时更新 base_url 和模型列表。"""
@@ -819,6 +834,7 @@ class BTCSignalApp:
         config["rsi_oversold"] = int(self.cfg_rsi_os.get())
         config["rsi_overbought"] = int(self.cfg_rsi_ob.get())
         config["cooldown_minutes"] = int(self.cfg_cooldown.get())
+        config["strategy_mode"] = self.cfg_strategy_mode.get()
 
         save_config(config)
         self.cfg_status.config(text="设置已保存！", fg=self.green)
@@ -871,7 +887,7 @@ class BTCSignalApp:
     def _run_signal_once(self):
         try:
             config = load_config()
-            candles = fetch_candles(config["instrument"], config["bar"], limit=30)
+            candles = fetch_candles(config["instrument"], config["bar"], limit=60)
             price = candles[-1]["close"]
             upper, mid, lower = calc_bb(candles, config["bb_period"], config["bb_mult"])
             rsi = calc_rsi(candles, config["rsi_period"])
@@ -939,6 +955,11 @@ class BTCSignalApp:
         self.lbl_regime.config(text=f"{regime_cn} ({s['regime_conf']:.0%})", fg=regime_color)
         self.lbl_status.config(text=s["status_msg"])
 
+        # Strategy mode
+        strategy_mode = config.get("strategy_mode", "mean_reversion")
+        mode_info = get_mode_info(strategy_mode)
+        self.lbl_strategy_mode.config(text=f"当前策略: {mode_info['name']} ({strategy_mode}) — {mode_info['description']}")
+
         # Config bar
         config = load_config()
         self.lbl_config_bar.config(
@@ -986,7 +1007,7 @@ def main():
     # Initial data fetch
     try:
         config = load_config()
-        candles = fetch_candles(config["instrument"], config["bar"], limit=30)
+        candles = fetch_candles(config["instrument"], config["bar"], limit=60)
         price = candles[-1]["close"]
         upper, mid, lower = calc_bb(candles, config["bb_period"], config["bb_mult"])
         rsi = calc_rsi(candles, config["rsi_period"])
