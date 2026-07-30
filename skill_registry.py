@@ -153,174 +153,389 @@ def run_skill(skill_id: str, ai_client, okx_client) -> str:
     )
 
 
-# ── Data Fetchers ───────────────────────────────────────────
+# ── Data Fetchers — 尽最大努力使用所有可用工具 ─────────────
 
 def _fetch_btc_full_data(client) -> dict:
+    """综合报告：调用一切可用的工具获取最全面的数据。"""
     from skills.sentiment import fetch_fear_greed
-    candles = client.get_candles("BTC-USDT-SWAP", "15m", 60)
+    from strategy_engine import check_signal
+    cli = _get_cli()
+
+    # 行情数据（公开，永远可用）
     ticker = client.get_ticker("BTC-USDT-SWAP")
+    candles_15m = client.get_candles("BTC-USDT-SWAP", "15m", 60)
+    candles_1h = client.get_candles("BTC-USDT-SWAP", "1H", 60)
     oi = client.get_open_interest("BTC-USDT-SWAP")
     fr = client.get_funding_rate("BTC-USDT-SWAP")
-    fg = fetch_fear_greed(1)
-    from strategy_engine import check_signal
+    fg = fetch_fear_greed(7)
 
-    config = {"strategy_mode": "mean_reversion", "bb_period": 20, "bb_mult": 2.0,
-              "rsi_period": 14, "rsi_oversold": 35, "rsi_overbought": 65}
-    signal, reason = check_signal(candles, config, "NONE")
+    # 技术指标（公开 API，永远可用）
+    indicators = {}
+    for ind in ["rsi", "macd", "bb", "adx", "ema", "supertrend"]:
+        try:
+            data = client.get_indicator("BTC-USDT-SWAP", ind, "1H")
+            if data:
+                indicators[ind] = data[0] if isinstance(data, list) and data else data
+        except Exception:
+            pass
 
-    news = client.get_news_latest(5) if client.has_credentials() else []
-    traders = client.get_smart_money_traders("7", "pnl", 5) if client.has_credentials() else []
-    signals = client.get_smart_money_signals("7", "pnl", 3) if client.has_credentials() else []
+    # 3 策略信号检测
+    config = {"bb_period": 20, "bb_mult": 2.0, "rsi_period": 14,
+              "rsi_oversold": 35, "rsi_overbought": 65,
+              "breakout_lookback": 20, "breakout_vol_mult": 1.2}
+    sig_results = {}
+    for mode in ["mean_reversion", "trend_following", "breakout"]:
+        action, reason = check_signal(candles_15m, {**config, "strategy_mode": mode}, "NONE")
+        sig_results[mode] = {"action": action or "无信号", "reason": reason}
+
+    # 新闻（CLI 优先 > REST API）
+    news = []
+    if cli:
+        try:
+            news_r = cli.news_by_coin("BTC", 10)
+            news = news_r.get("data", []) if isinstance(news_r, dict) else []
+        except Exception:
+            pass
+    if not news and client.has_credentials():
+        news = client.get_news_by_coin("BTC", 10)
+
+    # 智能资金（CLI 优先 > REST API）
+    traders, signals = [], []
+    if cli:
+        try:
+            t = cli.smartmoney_traders("7", "pnl", 10)
+            s = cli.smartmoney_signals("7", "pnl", 5)
+            traders = t.get("data", []) if isinstance(t, dict) else []
+            signals = s.get("data", []) if isinstance(s, dict) else []
+        except Exception:
+            pass
+    if not traders and client.has_credentials():
+        traders = client.get_smart_money_traders("7", "pnl", 10)
+        signals = client.get_smart_money_signals("7", "pnl", 5)
+
+    # 账户数据（认证，可选）
+    positions = []
+    balances = {}
+    if cli:
+        try:
+            pos_r = cli.account_positions()
+            bal_r = cli.account_balance()
+            positions = pos_r.get("data", []) if isinstance(pos_r, dict) else []
+            balances = bal_r.get("data", {}) if isinstance(bal_r, dict) else {}
+        except Exception:
+            pass
+    if not positions and client.has_credentials():
+        positions = client.get_positions()
+        balances = client.get_balance()
 
     return {
         "price": ticker["last"], "high24h": ticker["high24h"], "low24h": ticker["low24h"],
         "vol24h": ticker["vol24h"], "oi": oi["oi"], "funding_rate": fr["funding_rate"],
-        "fear_greed": fg[0] if fg else {},
-        "signal": signal, "signal_reason": reason,
-        "news": news, "top_traders": traders, "consensus_signals": signals,
+        "fear_greed": fg, "fear_greed_now": fg[0] if fg else {},
+        "indicators": indicators, "signals": sig_results,
+        "news": news, "news_count": len(news),
+        "top_traders": traders, "consensus_signals": signals,
+        "positions": positions, "balances": balances,
+        "has_cli": cli is not None,
+        "has_auth": client.has_credentials() or cli is not None,
+        "data_sources": _list_sources(cli, client.has_credentials()),
     }
 
 
 def _fetch_technical_data(client) -> dict:
-    candles = client.get_candles("BTC-USDT-SWAP", "1H", 100)
+    """技术分析：拉取 70+ 指标中最重要的 10+ 个。"""
     ticker = client.get_ticker("BTC-USDT-SWAP")
-    rsi_data = client.get_indicator("BTC-USDT-SWAP", "rsi", "1H")
-    macd_data = client.get_indicator("BTC-USDT-SWAP", "macd", "1H")
-    bb_data = client.get_indicator("BTC-USDT-SWAP", "bb", "1H")
-    adx_data = client.get_indicator("BTC-USDT-SWAP", "adx", "1H")
+    candles = client.get_candles("BTC-USDT-SWAP", "1H", 100)
+
+    # 批量拉取指标
+    indicator_list = ["rsi", "macd", "bb", "adx", "ema", "ma",
+                      "kdj", "supertrend", "atr", "cci", "wr", "mom"]
+    indicators = {}
+    for ind in indicator_list:
+        try:
+            data = client.get_indicator("BTC-USDT-SWAP", ind, "1H")
+            if data:
+                indicators[ind] = data[0] if isinstance(data, list) and data else data
+        except Exception:
+            pass
+
     return {
         "price": ticker["last"], "high24h": ticker["high24h"], "low24h": ticker["low24h"],
-        "candles_count": len(candles),
-        "rsi": rsi_data[0] if rsi_data else {},
-        "macd": macd_data[0] if macd_data else {},
-        "bb": bb_data[0] if bb_data else {},
-        "adx": adx_data[0] if adx_data else {},
+        "candles_count": len(candles), "indicators": indicators,
+        "indicator_count": len(indicators),
     }
 
 
 def _fetch_signal_data(client) -> dict:
+    """交易信号：3 策略并行 + 多时间周期验证。"""
     from strategy_engine import check_signal, get_available_modes
-    candles = client.get_candles("BTC-USDT-SWAP", "15m", 60)
     ticker = client.get_ticker("BTC-USDT-SWAP")
     fr = client.get_funding_rate("BTC-USDT-SWAP")
 
     config_base = {"bb_period": 20, "bb_mult": 2.0, "rsi_period": 14,
                    "rsi_oversold": 35, "rsi_overbought": 65,
                    "breakout_lookback": 20, "breakout_vol_mult": 1.2}
+
+    # 多时间周期验证
     results = {}
-    for mode in ["mean_reversion", "trend_following", "breakout"]:
-        cfg = {**config_base, "strategy_mode": mode}
-        action, reason = check_signal(candles, cfg, "NONE")
-        results[mode] = {"action": action or "无信号", "reason": reason}
+    for bar_name, bar in [("15m", "15m"), ("1H", "1H"), ("4H", "4H")]:
+        try:
+            candles = client.get_candles("BTC-USDT-SWAP", bar, 60)
+            bar_results = {}
+            for mode in ["mean_reversion", "trend_following", "breakout"]:
+                action, reason = check_signal(candles, {**config_base, "strategy_mode": mode}, "NONE")
+                bar_results[mode] = action or "无信号"
+            results[bar_name] = bar_results
+        except Exception:
+            results[bar_name] = {"error": "数据获取失败"}
 
     return {"price": ticker["last"], "funding_rate": fr["funding_rate"],
-            "signals": results, "modes": {k: v["name"] for k, v in get_available_modes().items()}}
+            "multi_timeframe": results,
+            "modes": {k: v["name"] for k, v in get_available_modes().items()}}
 
 
 def _fetch_smart_money_data(client) -> dict:
+    """智能资金：交易员排行榜 + 多周期信号 + 个别交易员持仓。"""
     cli = _get_cli()
-    if cli:
-        traders = cli.smartmoney_traders("7", "pnl", 10)
-        signals = cli.smartmoney_signals("7", "pnl", 5)
-        return {"traders": traders.get("data", []), "signals": signals.get("data", []),
-                "has_auth": True, "note": "数据来源: OKX CLI"}
 
-    traders = client.get_smart_money_traders("7", "pnl", 10)
-    signals = client.get_smart_money_signals("7", "pnl", 5)
-    return {"traders": traders, "signals": signals,
-            "has_auth": client.has_credentials(),
-            "note": "" if client.has_credentials() else "请配置 OKX API Key 或安装 CLI 后查看"}
+    traders_7d = traders_30d = signals_7d = signals_30d = []
+
+    if cli:
+        try:
+            traders_7d = cli.smartmoney_traders("7", "pnl", 10)
+            traders_7d = traders_7d.get("data", []) if isinstance(traders_7d, dict) else []
+            traders_30d = cli.smartmoney_traders("30", "pnl", 10)
+            traders_30d = traders_30d.get("data", []) if isinstance(traders_30d, dict) else []
+            signals_7d = cli.smartmoney_signals("7", "pnl", 5)
+            signals_7d = signals_7d.get("data", []) if isinstance(signals_7d, dict) else []
+            signals_30d = cli.smartmoney_signals("30", "pnl", 5)
+            signals_30d = signals_30d.get("data", []) if isinstance(signals_30d, dict) else []
+        except Exception:
+            pass
+
+    if not traders_7d and client.has_credentials():
+        traders_7d = client.get_smart_money_traders("7", "pnl", 10)
+        signals_7d = client.get_smart_money_signals("7", "pnl", 5)
+
+    return {
+        "traders_7d": traders_7d[:5], "traders_30d": traders_30d[:5],
+        "signals_7d": signals_7d, "signals_30d": signals_30d,
+        "has_data": bool(traders_7d or traders_30d),
+        "note": "" if (traders_7d or cli or client.has_credentials())
+                else "请配置 OKX API Key 或安装 CLI",
+    }
 
 
 def _fetch_sentiment_data(client) -> dict:
+    """市场情绪：恐惧贪婪 + 新闻 + 智能资金情绪。"""
     from skills.sentiment import fetch_fear_greed
-    fg = fetch_fear_greed(7)
-
     cli = _get_cli()
-    if cli:
-        news = cli.news_by_coin("BTC", 10)
-        return {"fear_greed": fg, "news": news.get("data", []),
-                "has_auth": True, "note": "数据来源: OKX CLI"}
 
-    news = client.get_news_by_coin("BTC", 10) if client.has_credentials() else []
-    return {"fear_greed": fg, "news": news,
-            "has_auth": client.has_credentials(),
-            "note": "" if client.has_credentials() else "请配置 OKX API Key 或安装 CLI 获取实时新闻"}
+    fg = fetch_fear_greed(14)  # 14天趋势
+
+    news = []
+    if cli:
+        try:
+            r = cli.news_latest(15)
+            news = r.get("data", []) if isinstance(r, dict) else []
+        except Exception:
+            pass
+    if not news and client.has_credentials():
+        news = client.get_news_latest(15)
+
+    return {
+        "fear_greed": fg, "fear_greed_now": fg[0] if fg else {},
+        "fear_greed_trend_14d": [d["value"] for d in fg] if fg else [],
+        "news": news[:15], "news_count": len(news),
+        "has_auth": client.has_credentials() or cli is not None,
+    }
 
 
 def _fetch_risk_data(client) -> dict:
-    positions = client.get_positions() if client.has_credentials() else []
-    balances = client.get_balance() if client.has_credentials() else {}
-    return {"positions": positions, "balances": balances,
-            "has_auth": client.has_credentials(),
-            "note": "" if client.has_credentials() else "请配置 OKX API Key 查看持仓风险"}
+    """风险评估：持仓 + 余额 + 账户配置。"""
+    cli = _get_cli()
+
+    positions = balances = config_data = []
+    if cli:
+        try:
+            positions = cli.account_positions()
+            positions = positions.get("data", []) if isinstance(positions, dict) else []
+            balances = cli.account_balance()
+            balances = balances.get("data", {}) if isinstance(balances, dict) else {}
+        except Exception:
+            pass
+    if not positions and client.has_credentials():
+        positions = client.get_positions()
+        balances = client.get_balance()
+        config_data = client.get_account_config()
+
+    return {
+        "positions": positions, "balances": balances,
+        "account_config": config_data,
+        "position_count": len(positions) if isinstance(positions, list) else 0,
+        "has_auth": client.has_credentials() or cli is not None,
+        "note": "" if (positions or cli or client.has_credentials())
+                else "请配置 OKX API Key 或安装 CLI 查看持仓",
+    }
 
 
 def _fetch_plan_data(client) -> dict:
-    from strategy_engine import check_signal, get_available_modes
-    candles = client.get_candles("BTC-USDT-SWAP", "1H", 100)
+    """交易计划：行情 + 信号 + 智能资金 + 情绪，全部数据综合。"""
+    from strategy_engine import check_signal
     ticker = client.get_ticker("BTC-USDT-SWAP")
+    candles = client.get_candles("BTC-USDT-SWAP", "1H", 100)
     oi = client.get_open_interest("BTC-USDT-SWAP")
     fr = client.get_funding_rate("BTC-USDT-SWAP")
 
-    config_base = {"bb_period": 20, "bb_mult": 2.0, "rsi_period": 14,
-                   "rsi_oversold": 35, "rsi_overbought": 65, "strategy_mode": "mean_reversion"}
-    signal, reason = check_signal(candles, config_base, "NONE")
+    # 信号
+    config = {"bb_period": 20, "bb_mult": 2.0, "rsi_period": 14,
+              "rsi_oversold": 35, "rsi_overbought": 65,
+              "breakout_lookback": 20, "breakout_vol_mult": 1.2}
+    signals = {}
+    for mode in ["mean_reversion", "trend_following", "breakout"]:
+        action, reason = check_signal(candles, {**config, "strategy_mode": mode}, "NONE")
+        signals[mode] = {"action": action or "无信号", "reason": reason}
 
-    smart = client.get_smart_money_signals("7", "pnl", 3) if client.has_credentials() else []
-    traders = client.get_smart_money_traders("7", "pnl", 5) if client.has_credentials() else []
+    # 关键指标
+    indicators = {}
+    for ind in ["rsi", "macd", "bb", "adx", "supertrend"]:
+        try:
+            data = client.get_indicator("BTC-USDT-SWAP", ind, "1H")
+            if data:
+                indicators[ind] = data[0] if isinstance(data, list) and data else data
+        except Exception:
+            pass
 
-    return {"price": ticker["last"], "oi": oi["oi"], "funding_rate": fr["funding_rate"],
-            "signal": signal, "signal_reason": reason,
-            "smart_signals": smart, "top_traders": traders,
-            "has_auth": client.has_credentials()}
+    # 智能资金 + 恐惧贪婪
+    cli = _get_cli()
+    traders, smart_sigs = [], []
+    if cli:
+        try:
+            traders = cli.smartmoney_traders("7", "pnl", 5)
+            smart_sigs = cli.smartmoney_signals("7", "pnl", 3)
+        except Exception:
+            pass
+    if not traders and client.has_credentials():
+        traders = client.get_smart_money_traders("7", "pnl", 5)
+        smart_sigs = client.get_smart_money_signals("7", "pnl", 3)
+    from skills.sentiment import fetch_fear_greed
+    fg = fetch_fear_greed(1)
+
+    return {
+        "price": ticker["last"], "high24h": ticker["high24h"], "low24h": ticker["low24h"],
+        "oi": oi["oi"], "funding_rate": fr["funding_rate"],
+        "indicators": indicators, "signals": signals,
+        "smart_signals": smart_sigs, "top_traders": traders,
+        "fear_greed": fg[0] if fg else {},
+        "has_auth": client.has_credentials() or cli is not None,
+        "data_sources": _list_sources(cli, client.has_credentials()),
+    }
 
 
 # ── Prompt Templates ────────────────────────────────────────
 
 def _prompt_btc_full(data: dict) -> tuple:
-    sp = "你是加密货币分析师。用中文回答，输出结构化市场分析。"
-    um = f"""请对 BTC 做多维度综合分析（200字以内）：
+    sp = "你是资深加密货币分析师。用中文输出精准的结构化市场分析报告。"
+    fg = data.get("fear_greed_now", {})
+    indicators = data.get("indicators", {})
+    sigs = data.get("signals", {})
+    traders = data.get("top_traders", [])
+    cons = data.get("consensus_signals", [])
 
-价格: ${data.get('price', 0):,.1f}
-24h: ${data.get('high24h', 0):,.1f} / ${data.get('low24h', 0):,.1f}
-OI: {data.get('oi', 0):,.0f} 合约
-资金费率: {data.get('funding_rate', 0):.6f}
-恐惧贪婪: {data.get('fear_greed', {}).get('value', '?')}/100 ({data.get('fear_greed', {}).get('classification', '?')})
-当前信号: {data.get('signal') or '无'} — {data.get('signal_reason', '')}
+    # 格式化指标
+    ind_lines = []
+    for name, val in indicators.items():
+        v = val.get("value") or val.get(list(val.keys())[0]) if isinstance(val, dict) and val else str(val)
+        ind_lines.append(f"  {name.upper()}: {v}")
+    ind_text = "\n".join(ind_lines[:15]) if ind_lines else "无"
 
-新闻数: {len(data.get('news', []))}
-大户信号数: {len(data.get('consensus_signals', []))}
+    # 格式化信号
+    sig_lines = []
+    for mode, s in sigs.items():
+        sig_lines.append(f"  {mode}: {s.get('action', '?')} — {s.get('reason', '')}")
+    sig_text = "\n".join(sig_lines)
 
-请按此格式输出：
-趋势判断: <上升/下降/震荡>
-关键价位: 支撑 $xxx 阻力 $xxx
-操作建议: <一句话>"""
+    # 格式化交易员
+    t_lines = []
+    for t in traders[:5]:
+        t_lines.append(f"  {t.get('nickname', t.get('nickName', '?'))}: "
+                      f"PnL {_pct(t.get('pnl_ratio', t.get('pnlRatio', 0)))}, "
+                      f"胜率 {_pct(t.get('win_rate', t.get('winRate', 0)))}")
+    t_text = "\n".join(t_lines) if t_lines else "无数据"
+
+    # 共识信号
+    c_lines = []
+    for c in cons[:5]:
+        c_lines.append(f"  {c.get('inst_ccy', c.get('instCcy', '?'))}: "
+                      f"多{_pct(c.get('l_ratio', c.get('lRatio', 0)))} "
+                      f"空{_pct(c.get('s_ratio', c.get('sRatio', 0)))}")
+    c_text = "\n".join(c_lines) if c_lines else "无数据"
+
+    # 数据源说明
+    sources = data.get("data_sources", "")
+
+    um = f"""BTC 综合数据 ({sources})：
+
+【行情】
+  价格: ${data.get('price', 0):,.1f}
+  24h 范围: ${data.get('high24h', 0):,.1f} ~ ${data.get('low24h', 0):,.1f}
+  成交量: ${data.get('vol24h', 0):,.0f}
+  OI: {data.get('oi', 0):,.0f} 合约
+  资金费率: {data.get('funding_rate', 0):.6f}
+
+【技术指标】
+{ind_text}
+
+【策略信号】
+{sig_text}
+
+【恐惧贪婪】
+  {fg.get('value', '?')}/100 — {fg.get('classification', '?')}
+  7日趋势: {[d.get('value', 0) for d in data.get('fear_greed', [])[:7]]}
+
+【大户动向 ({len(traders)}人)】
+{t_text}
+
+【共识信号】
+{c_text}
+
+【新闻】{data.get('news_count', 0)}条
+
+请给出精准的 BTC 综合分析（300字以内）：
+
+1. 趋势判断: <上升/下降/震荡>，置信度 xx%
+2. 关键价位: 支撑 $xxx / 阻力 $xxx（基于 BB+EMA）
+3. 资金面: 大户偏多/偏空，资金费率含义
+4. 情绪面: 恐惧贪婪 + 新闻方向
+5. 综合建议: 做多/做空/观望，具体理由"""
     return sp, um
 
 
 def _prompt_technical(data: dict) -> tuple:
-    sp = "你是技术分析师。用中文输出技术分析，简洁专业。"
-    rsi_info = data.get("rsi", {})
-    macd_info = data.get("macd", {})
-    bb_info = data.get("bb", {})
-    adx_info = data.get("adx", {})
+    sp = "你是专业的技术分析师。用中文输出精准的技术分析。"
+    indicators = data.get("indicators", {})
+
+    ind_lines = []
+    for name, val in indicators.items():
+        if isinstance(val, dict) and val:
+            v = val.get("value") or val.get(list(val.keys())[0])
+            ind_lines.append(f"  {name.upper()}: {v}")
+        else:
+            ind_lines.append(f"  {name.upper()}: {val}")
+    ind_text = "\n".join(ind_lines)
 
     um = f"""BTC 当前价格: ${data.get('price', 0):,.1f}
+24h: ${data.get('high24h', 0):,.1f} ~ ${data.get('low24h', 0):,.1f}
+共获取 {data.get('indicator_count', 0)} 个指标：
 
-指标数据：
-RSI(14,1H): {rsi_info}
-MACD(1H): {macd_info}
-布林带(1H): {bb_info}
-ADX(1H): {adx_info}
-24h 范围: ${data.get('high24h', 0):,.1f} / ${data.get('low24h', 0):,.1f}
+{ind_text}
 
-请分析（150字以内）：
-趋势: <方向>
-支撑位/阻力位: <具体价位>
-指标信号: RSI/MACD/ADX 各自给出的信号
-操作建议: <一句话>"""
-    return sp, um
+请给出精准的技术分析（200字）：
+1. 趋势: 方向+强度(基于ADX/EMA排列/SUPERTREND)
+2. RSI/MACD/KDJ 各自信号及含义
+3. 布林带位置: 价格在带中的位置 + 带宽变化
+4. 关键价位: 支撑位 + 阻力位（具体数值）
+5. 操作建议: 方向+时机"""
 
 
 def _prompt_signal(data: dict) -> tuple:
@@ -461,6 +676,26 @@ def _extract_key_metrics(data: dict) -> dict:
     if "candles_count" in data:
         metrics["K线数据"] = f"{data['candles_count']} 条"
     return metrics
+
+
+def _pct(val) -> str:
+    """格式化百分比。"""
+    if isinstance(val, float):
+        return f"{val:.1%}"
+    try:
+        return f"{float(val):.1%}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
+def _list_sources(cli, has_auth: bool) -> str:
+    """列出当前可用的数据源。"""
+    sources = ["公开API"]
+    if has_auth:
+        sources.append("认证API")
+    if cli:
+        sources.append("CLI")
+    return " + ".join(sources)
 
 
 def _summarize_data(data: dict) -> str:
